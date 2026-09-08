@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>ヒトメ — カメラ認識</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<style>
+  :root{--ink:#0F1E28;--panel:#173040;--paper:#F3EFE4;--mute:#8FB3C4;--amber:#FFB03B;--amber-dk:#C97F12;--line:rgba(255,176,59,.6)}
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden;background:var(--ink);color:var(--paper);
+    font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}
+  #app{position:fixed;inset:0;display:flex;flex-direction:column}
+  header{padding:calc(env(safe-area-inset-top) + 12px) 18px 8px;display:flex;justify-content:space-between;align-items:baseline;background:var(--panel)}
+  header h1{font-size:19px;letter-spacing:.06em}
+  header small{color:var(--mute);font-size:12px}
+  .view{position:relative;flex:1;background:#000;overflow:hidden}
+  video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  svg.lines{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+  svg.lines rect{fill:none;stroke:var(--line);stroke-width:1.5;stroke-dasharray:5 4}
+  .tag{position:absolute;transform:translate(0,-100%);background:rgba(15,30,40,.9);border:1px solid var(--line);
+    color:var(--paper);padding:5px 9px 5px 8px;border-radius:4px 12px 12px 12px;font-size:13px;display:flex;gap:7px;align-items:center;
+    white-space:nowrap;cursor:pointer;font:inherit}
+  .tag .n{background:var(--amber);color:var(--ink);font-size:11px;font-weight:700;padding:1px 7px;border-radius:10px}
+  .tag.loud{border-color:var(--amber);box-shadow:0 0 10px rgba(255,176,59,.4)}
+  .meta{position:absolute;left:10px;right:10px;bottom:10px;display:flex;justify-content:space-between;font-size:11px;color:var(--mute);
+    background:rgba(15,30,40,.65);padding:5px 10px;border-radius:10px;pointer-events:none}
+  .overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:30px;text-align:center;background:var(--panel)}
+  .overlay p{color:var(--mute);font-size:14px;line-height:1.7;max-width:320px}
+  .overlay.hidden{display:none}
+  .bar{display:flex;gap:10px;padding:12px 16px calc(env(safe-area-inset-bottom) + 16px);background:var(--panel)}
+  button{font:inherit;cursor:pointer;border:0;border-radius:12px;padding:12px 16px;font-weight:700}
+  .primary{flex:1;background:var(--amber);color:var(--ink)}
+  .ghost{background:#1F3D50;color:var(--paper);font-weight:500}
+  button:disabled{opacity:.5}
+  .sheet{position:absolute;left:0;right:0;bottom:0;background:var(--paper);color:var(--ink);border-radius:22px 22px 0 0;
+    padding:16px 20px calc(env(safe-area-inset-bottom) + 20px);transform:translateY(105%);transition:transform .3s cubic-bezier(.2,.8,.2,1);
+    max-height:65%;overflow:auto;z-index:5}
+  .sheet.open{transform:translateY(0)}
+  .sheet h2{font-size:19px}
+  .sheet .cat{color:#6B6455;font-size:12px;margin:2px 0 10px}
+  .notes{list-style:none;display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
+  .notes li{background:#fff;border-left:3px solid var(--amber-dk);padding:8px 10px;border-radius:4px;font-size:14px}
+  .notes li span{display:block;color:#8A8272;font-size:11px;margin-top:2px}
+  .empty{color:#8A8272;font-size:14px;margin-bottom:12px}
+  .row{display:flex;gap:8px}
+  input{flex:1;font:inherit;font-size:16px;padding:10px 12px;border:1.5px solid #C9C2B3;border-radius:10px;background:#fff}
+  .row button{background:var(--ink);color:var(--paper)}
+  .close{position:absolute;top:8px;right:12px;background:none;color:#8A8272;font-size:22px;padding:4px 8px}
+  .err{color:#FFB3A6;font-size:13px}
+</style>
+</head>
+<body>
+<div id="app">
+  <header><h1>ヒトメ</h1><small id="status">準備中</small></header>
+
+  <div class="view" id="view">
+    <video id="cam" playsinline muted autoplay></video>
+    <svg class="lines" id="boxes"></svg>
+    <div id="tags"></div>
+    <div class="meta"><span id="pos">位置: —</span><span id="head">方角: —</span></div>
+
+    <div class="overlay" id="overlay">
+      <h2>カメラで見て、タグを付ける</h2>
+      <p>カメラ・位置情報・向きの許可を求めます。認識は端末内で行い、映像は外に送りません。メモはこの端末のブラウザに保存されます。</p>
+      <button class="primary" id="start" style="flex:none;min-width:200px">はじめる</button>
+      <p class="err" id="err"></p>
+    </div>
+  </div>
+
+  <div class="bar">
+    <button class="primary" id="freeze" disabled>止める</button>
+    <button class="ghost" id="clear">メモを全消去</button>
+  </div>
+
+  <div class="sheet" id="sheet">
+    <button class="close" id="close" aria-label="閉じる">×</button>
+    <h2 id="sTitle"></h2>
+    <div class="cat" id="sCat"></div>
+    <div id="sNotes"></div>
+    <div class="row"><input id="noteIn" placeholder="この物について一言メモ" maxlength="80"><button id="add">追加</button></div>
+  </div>
+</div>
+
+<script>
+// ---- COCO ラベルの日本語化（未定義は英語のまま）
+const JA={person:'人',bicycle:'自転車',car:'車',motorcycle:'バイク',bus:'バス',train:'電車',truck:'トラック',boat:'ボート',
+'traffic light':'信号',bench:'ベンチ',bird:'鳥',cat:'猫',dog:'犬',backpack:'リュック',umbrella:'傘',handbag:'バッグ',suitcase:'スーツケース',
+bottle:'ボトル',cup:'カップ',fork:'フォーク',knife:'ナイフ',spoon:'スプーン',bowl:'ボウル',banana:'バナナ',apple:'りんご',sandwich:'サンドイッチ',
+orange:'みかん',pizza:'ピザ',donut:'ドーナツ',cake:'ケーキ',chair:'椅子',couch:'ソファ','potted plant':'観葉植物',bed:'ベッド',
+'dining table':'テーブル',toilet:'トイレ',tv:'テレビ',laptop:'ノートPC',mouse:'マウス',remote:'リモコン',keyboard:'キーボード',
+'cell phone':'スマホ',microwave:'電子レンジ',oven:'オーブン',toaster:'トースター',sink:'シンク',refrigerator:'冷蔵庫',book:'本',
+clock:'時計',vase:'花瓶',scissors:'はさみ','teddy bear':'ぬいぐるみ','wine glass':'グラス','stop sign':'標識','fire hydrant':'消火栓',
+'parking meter':'パーキングメーター',clock2:'時計'};
+const ja=k=>JA[k]||k;
+
+// ---- 状態
+const $=id=>document.getElementById(id);
+const video=$('cam'),view=$('view'),tagsEl=$('tags'),boxes=$('boxes'),status=$('status');
+let model=null,frozen=false,running=false,lastDets=[],pos=null,heading=null,current=null;
+
+// メモ保存：ラベル＋位置（約100m格子）で束ねる
+const gridKey=()=>pos?`${pos.lat.toFixed(3)},${pos.lng.toFixed(3)}`:'nowhere';
+const noteKey=label=>`hitome:${label}@${gridKey()}`;
+const loadNotes=label=>{try{return JSON.parse(localStorage.getItem(noteKey(label))||'[]')}catch{return[]}};
+const saveNotes=(label,n)=>localStorage.setItem(noteKey(label),JSON.stringify(n));
+
+// ---- 起動
+$('start').onclick=async()=>{
+  const err=$('err'); err.textContent='';
+  if(!window.isSecureContext){err.textContent='HTTPSで開いてください（file:// や http:// ではカメラが使えません）';return}
+  try{
+    status.textContent='カメラ起動中';
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false});
+    video.srcObject=stream; await video.play();
+  }catch(e){err.textContent='カメラを使えませんでした: '+e.message;status.textContent='停止';return}
+
+  // 位置と向き（拒否されても続行）
+  if(navigator.geolocation) navigator.geolocation.watchPosition(p=>{
+    pos={lat:p.coords.latitude,lng:p.coords.longitude};
+    $('pos').textContent=`位置: ${pos.lat.toFixed(4)}, ${pos.lng.toFixed(4)}`;
+  },()=>{$('pos').textContent='位置: 取得できず'},{enableHighAccuracy:true,maximumAge:5000});
+  await enableOrientation();
+
+  $('overlay').classList.add('hidden');
+  status.textContent='認識モデル読込中…';
+  try{ model=await cocoSsd.load({base:'lite_mobilenet_v2'}); }
+  catch(e){status.textContent='モデル読込失敗';alert('認識モデルを読み込めませんでした。通信環境を確認してください。\n'+e.message);return}
+  status.textContent='認識中';
+  $('freeze').disabled=false; running=true; loop();
+};
+
+async function enableOrientation(){
+  const handler=e=>{
+    let h=e.webkitCompassHeading!=null?e.webkitCompassHeading:(e.alpha!=null?360-e.alpha:null);
+    if(h!=null){heading=Math.round(h)%360;$('head').textContent=`方角: ${heading}° ${dir(heading)}`}
+  };
+  try{
+    if(typeof DeviceOrientationEvent!=='undefined'&&DeviceOrientationEvent.requestPermission){
+      if(await DeviceOrientationEvent.requestPermission()!=='granted')return;
+    }
+    window.addEventListener('deviceorientationabsolute',handler,true);
+    window.addEventListener('deviceorientation',handler,true);
+  }catch{}
+}
+const dir=h=>['北','北東','東','南東','南','南西','西','北西'][Math.round(h/45)%8];
+
+// ---- 検出ループ
+async function loop(){
+  if(!running)return;
+  if(!frozen&&video.readyState>=2){
+    try{ lastDets=(await model.detect(video,10,.5)); render(lastDets); }catch{}
+  }
+  setTimeout(loop,frozen?200:120);
+}
+
+// video(object-fit:cover)の座標 → 画面座標
+function mapBox([x,y,w,h]){
+  const vw=video.videoWidth,vh=video.videoHeight,W=view.clientWidth,H=view.clientHeight;
+  const s=Math.max(W/vw,H/vh),ox=(W-vw*s)/2,oy=(H-vh*s)/2;
+  return [x*s+ox,y*s+oy,w*s,h*s];
+}
+
+function render(dets){
+  boxes.innerHTML=''; tagsEl.innerHTML='';
+  const seen=new Set();
+  dets.forEach(d=>{
+    const [x,y,w,h]=mapBox(d.bbox);
+    boxes.insertAdjacentHTML('beforeend',`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="6"/>`);
+    const notes=loadNotes(d.class);
+    const b=document.createElement('button');
+    b.className='tag'+(notes.length?' loud':'');
+    b.style.left=Math.max(4,Math.min(x,view.clientWidth-120))+'px'; b.style.top=Math.max(30,y-4)+'px';
+    b.innerHTML=`<b>${ja(d.class)}</b><span class="n">${notes.length}</span>`;
+    b.onclick=()=>openSheet(d.class);
+    tagsEl.appendChild(b); seen.add(d.class);
+  });
+  status.textContent=frozen?'停止中':`認識中 · ${seen.size}種`;
+}
+
+// ---- 止める / 再開
+$('freeze').onclick=function(){
+  frozen=!frozen; this.textContent=frozen?'再開':'止める';
+  if(frozen){video.pause()}else{video.play()}
+  render(lastDets);
+};
+
+// ---- メモ
+function openSheet(label){
+  current=label;
+  $('sTitle').textContent=ja(label);
+  $('sCat').textContent=`${label} · この付近（${pos?'約100m以内':'位置なし'}）のメモ`;
+  renderNotes(); $('sheet').classList.add('open');
+}
+function renderNotes(){
+  const n=loadNotes(current),el=$('sNotes');
+  el.innerHTML=n.length?'<ul class="notes">'+n.map(x=>`<li>${esc(x.t)}<span>${x.w}${x.h!=null?' · '+dir(x.h)+'向き':''}</span></li>`).join('')+'</ul>'
+                       :'<p class="empty">まだメモがありません。最初の一言を残しましょう。</p>';
+}
+const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+$('add').onclick=()=>{
+  const t=$('noteIn').value.trim(); if(!t)return;
+  const n=loadNotes(current);
+  n.unshift({t,w:new Date().toLocaleString('ja-JP',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}),h:heading,lat:pos?.lat,lng:pos?.lng});
+  saveNotes(current,n); $('noteIn').value=''; renderNotes(); render(lastDets);
+};
+$('noteIn').addEventListener('keydown',e=>{if(e.key==='Enter')$('add').click()});
+$('close').onclick=()=>$('sheet').classList.remove('open');
+$('clear').onclick=()=>{
+  if(!confirm('この端末に保存したメモをすべて消しますか？'))return;
+  Object.keys(localStorage).filter(k=>k.startsWith('hitome:')).forEach(k=>localStorage.removeItem(k));
+  render(lastDets);
+};
+window.addEventListener('resize',()=>render(lastDets));
+</script>
+</body>
+</html>
