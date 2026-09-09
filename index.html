@@ -237,7 +237,12 @@ const RADIUS=250;        // 取得半径（m）
 const SHOP_JA={convenience:'コンビニ',supermarket:'スーパー',bakery:'パン屋',clothes:'服',books:'本屋',hairdresser:'美容室',
   florist:'花屋',electronics:'電器店',mobile_phone:'携帯ショップ',chemist:'ドラッグストア',butcher:'肉屋',greengrocer:'八百屋',
   cafe:'カフェ',restaurant:'飲食店',fast_food:'ファストフード',bar:'バー',pub:'パブ',bank:'銀行',pharmacy:'薬局',library:'図書館',
-  post_office:'郵便局',dentist:'歯科',doctors:'医院',atm:'ATM',ice_cream:'アイス',cinema:'映画館',hotel:'ホテル'};
+  post_office:'郵便局',dentist:'歯科',doctors:'医院',atm:'ATM',ice_cream:'アイス',cinema:'映画館',hotel:'ホテル',
+  hearing_aids:'補聴器',musical_instrument:'楽器店',ticket:'チケット',copyshop:'印刷',stationery:'文具',optician:'メガネ',
+  jewelry:'宝飾',shoes:'靴',beauty:'美容',massage:'マッサージ',tobacco:'たばこ',alcohol:'酒屋',confectionery:'菓子',
+  seafood:'魚屋',variety_store:'雑貨',gift:'ギフト',furniture:'家具',hardware:'金物',car:'車販売',bicycle:'自転車店',
+  laundry:'クリーニング',travel_agency:'旅行代理店',kiosk:'売店',department_store:'百貨店',mall:'商業施設',yes:'店'};
+const catJa=k=>SHOP_JA[k]||k.replace(/_/g,' ');
 
 $('mode').onclick=function(){
   mode=mode==='object'?'place':'object';
@@ -271,7 +276,7 @@ async function fetchPlaces(){
     places=j.elements.map(e=>{
       const lat=e.lat??e.center?.lat,lng=e.lon??e.center?.lon; if(lat==null)return null;
       const t=e.tags||{},kind=t.shop||t.amenity||t.tourism||'';
-      return {id:'osm:'+e.type+e.id,name:t['name:ja']||t.name,cat:SHOP_JA[kind]||kind,lat,lng};
+      return {id:'osm:'+e.type+e.id,name:t['name:ja']||t.name,cat:catJa(kind),lat,lng};
     }).filter(Boolean);
     placesAt={...pos};
   }catch(e){status.textContent='店情報の取得に失敗';placesBusy=false;return}
@@ -284,24 +289,36 @@ function renderPlaces(){
   if(heading==null){status.textContent='コンパスが使えません';$('compass').textContent='向きを取得できていません';return}
   $('compass').textContent=`${dir(heading)} ${Math.round(heading)}°`;
   const W=view.clientWidth,H=view.clientHeight;
-  let shown=0;
-  places.map(p=>{p.dist=distM(pos,p);p.bearing=bearing(pos,p);p.delta=((p.bearing-heading+540)%360)-180;return p})
+  const list=places.map(p=>{p.dist=distM(pos,p);p.bearing=bearing(pos,p);p.delta=((p.bearing-heading+540)%360)-180;return p})
     .filter(p=>Math.abs(p.delta)<=FOV/2)
-    .sort((a,b)=>b.dist-a.dist)   // 遠い順に描いて、近い店が手前に来る
-    .slice(-14)
-    .forEach(p=>{
-      const x=(p.delta/FOV+0.5)*W;
-      const y=H*(0.22+0.45*(1-Math.min(p.dist,RADIUS)/RADIUS));   // 近いほど下（手前）
-      const scale=0.8+0.4*(1-Math.min(p.dist,RADIUS)/RADIUS);
-      const notes=loadNotes(p.id);
-      const b=document.createElement('button');
-      b.className='place'+(p.dist<40?' near':'')+(notes.length?' loud':'');
-      b.style.left=x+'px'; b.style.top=y+'px'; b.style.transform=`translate(-50%,-50%) scale(${scale})`;
-      b.style.zIndex=Math.round(1000-p.dist);
-      b.innerHTML=`<b>${esc(p.name)}</b><small>${esc(p.cat)} · ${Math.round(p.dist)}m</small>`;
-      b.onclick=()=>openSheet(p.id,p);
-      tagsEl.appendChild(b); shown++;
-    });
+    .sort((a,b)=>a.dist-b.dist)   // 近い順：近い店が良い場所を先取り
+    .slice(0,10);
+  // まず全部作って幅を測る
+  const items=list.map(p=>{
+    const notes=loadNotes(p.id);
+    const b=document.createElement('button');
+    b.className='place'+(p.dist<40?' near':'')+(notes.length?' loud':'');
+    b.innerHTML=`<b>${esc(p.name)}</b><small>${esc(p.cat)} · ${Math.round(p.dist)}m</small>`;
+    b.onclick=()=>openSheet(p.id,p);
+    b.style.visibility='hidden'; tagsEl.appendChild(b);
+    const near=1-Math.min(p.dist,RADIUS)/RADIUS;
+    return {p,b,scale:0.75+0.35*near,w:b.offsetWidth,h:b.offsetHeight,near};
+  });
+  const placed=[];
+  items.forEach(it=>{
+    const w=it.w*it.scale+8,h=it.h*it.scale+6;
+    let x=(it.p.delta/FOV+0.5)*W; x=Math.max(w/2,Math.min(W-w/2,x));
+    let y=H*(0.30+0.40*it.near);                       // 理想位置：近いほど下
+    const hits=r=>placed.some(q=>Math.abs(q.x-r.x)<(q.w+r.w)/2&&Math.abs(q.y-r.y)<(q.h+r.h)/2);
+    let r={x,y,w,h},tries=0;
+    while(hits(r)&&tries<30){ r.y-=h; if(r.y<h/2+30){r.y=y+h*(tries%3+1); } tries++; }   // 上に逃がし、無理なら下へ
+    if(hits(r)){ it.b.remove(); return; }              // それでも重なるなら諦める（近い店は既に置けている）
+    placed.push(r);
+    it.b.style.left=r.x+'px'; it.b.style.top=r.y+'px';
+    it.b.style.transform=`translate(-50%,-50%) scale(${it.scale})`;
+    it.b.style.zIndex=Math.round(1000-it.p.dist); it.b.style.visibility='';
+  });
+  const shown=placed.length;
   status.textContent=`周辺 ${places.length}軒 · 視野内 ${shown}`;
 }
 </script>
